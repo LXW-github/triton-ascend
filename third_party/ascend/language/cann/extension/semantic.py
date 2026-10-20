@@ -94,6 +94,16 @@ def create_sync_block_wait(sender, receiver, event_id, sender_pipe: PIPE, receiv
         _semantic.builder.sync_block_wait(sender, receiver, event_id.handle, sender_pipe.value, receiver_pipe.value)
 
 
+def get_next_task(core=None, _semantic=None):
+    """Emit hivm.hir.get_next_task via the unified builder."""
+    _semantic.builder.get_next_task(core)
+
+
+def wait_prev_task(pipe, core=None, _semantic=None):
+    """Emit hivm.hir.wait_prev_task via the unified builder."""
+    _semantic.builder.wait_prev_task(pipe, core)
+
+
 def sub_vec_id(_semantic=None) -> tl.tensor:
     return tl.tensor(_semantic.builder._ascend_builder.create_get_sub_vec_id(), tl.int64)
 

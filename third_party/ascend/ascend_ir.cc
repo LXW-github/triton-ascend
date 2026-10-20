@@ -1546,6 +1546,26 @@ void init_ascend_ir(py::module &&m) {
              self.create<hivm::SyncBlockOp>(
                  modeAttr, indexAttribute, mlir::Value{}, cubePipe, vectorPipe);
            })
+      .def("get_next_task",
+           [](AscendNPUIROpBuilder &self, py::object core) -> void {
+             auto *ctx = self.getBuilder().getContext();
+             hivm::TCoreTypeAttr coreAttr;
+             if (!core.is_none())
+               coreAttr =
+                   hivm::TCoreTypeAttr::get(ctx, py::cast<hivm::TCoreType>(core));
+             self.create<hivm::GetNextTaskOp>(coreAttr);
+           })
+      .def("wait_prev_task",
+           [](AscendNPUIROpBuilder &self, hivm::PIPE pipe,
+              py::object core) -> void {
+             auto *ctx = self.getBuilder().getContext();
+             hivm::PipeAttr pipeAttr = hivm::PipeAttr::get(ctx, pipe);
+             hivm::TCoreTypeAttr coreAttr;
+             if (!core.is_none())
+               coreAttr =
+                   hivm::TCoreTypeAttr::get(ctx, py::cast<hivm::TCoreType>(core));
+             self.create<hivm::WaitPrevTaskOp>(coreAttr, pipeAttr);
+           })
       .def("is_910_95",
            [](AscendNPUIROpBuilder &self) -> bool { return self.is_910_95(); })
       .def("create_copy_buffer",
