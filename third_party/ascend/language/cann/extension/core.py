@@ -301,6 +301,53 @@ def sync_block_all(mode, event_id, _semantic=None):
     _semantic.builder.sync_block_all(mode, event_id)
 
 
+@builtin
+def get_next_task(core=None, _semantic=None):
+    """Notifies the scheduler that the current task can overlap with the next task.
+
+    Emits ``GET_NEXT_TASK`` so the hardware scheduler may start the successor task
+    while the current task is still draining. Pairs with :func:`wait_prev_task` in
+    the successor task to enforce producer-consumer ordering on a specific pipe.
+
+    :param core: Owning core type. Must be ``CORE.CUBE`` or ``CORE.VECTOR`` when
+        specified; may be omitted in a pure AIC/AIV kernel and inferred later.
+    :type core: CORE
+    """
+    core = _unwrap_if_constexpr(core)
+    if core is not None and core not in (CORE.CUBE, CORE.VECTOR):
+        raise TypeError("core must be CUBE or VECTOR")
+    _semantic.builder.get_next_task(core.value if core is not None else None)
+
+
+@builtin
+def wait_prev_task(pipe, core=None, _semantic=None):
+    """Waits on the previous task reaching a given pipe before proceeding.
+
+    Emits ``WAIT_PREV_TASK`` which blocks the current task until the predecessor
+    task has finished executing on the given pipe (4-bit immediate in the machine
+    instruction). Must be paired with a :func:`get_next_task` in the predecessor.
+
+    :param pipe: Pipe to wait on. One of ``PIPE_S``, ``PIPE_V``, ``PIPE_M``,
+        ``PIPE_MTE1``, ``PIPE_MTE2``, ``PIPE_MTE3``, ``PIPE_FIX``.
+    :type pipe: PIPE
+    :param core: Owning core type. Must be ``CORE.CUBE`` or ``CORE.VECTOR`` when
+        specified; may be omitted in a pure AIC/AIV kernel and inferred later.
+        Required in MIX kernels for ``PIPE_S`` / ``PIPE_MTE2``.
+    :type core: CORE
+    """
+    pipe = _unwrap_if_constexpr(pipe)
+    core = _unwrap_if_constexpr(core)
+    if not isinstance(pipe, PIPE):
+        raise TypeError("pipe must be an al.PIPE enum")
+    supported_pipes = (PIPE.PIPE_S, PIPE.PIPE_V, PIPE.PIPE_M, PIPE.PIPE_MTE1,
+                       PIPE.PIPE_MTE2, PIPE.PIPE_MTE3, PIPE.PIPE_FIX)
+    if pipe not in supported_pipes:
+        raise ValueError(f"unsupported wait_prev_task pipe: {pipe}")
+    if core is not None and core not in (CORE.CUBE, CORE.VECTOR):
+        raise TypeError("core must be CUBE or VECTOR")
+    _semantic.builder.wait_prev_task(pipe.value, core.value if core is not None else None)
+
+
 class FixpipeDMAMode(enum.Enum):
     NZ2DN = ascend_ir.FixpipeDMAMode.NZ2DN
     NZ2ND = ascend_ir.FixpipeDMAMode.NZ2ND

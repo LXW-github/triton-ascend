@@ -186,6 +186,7 @@ class AscendInterpreterBuilder(InterpreterBuilder):
     - index_select_simd: SIMD gather operation
     - get_sub_vec_id: Get vector core ID for 1:2 ratio emulation
     - Synchronization operations: sync_block_set/wait/all
+    - Task control operations: get_next_task/wait_prev_task (no-ops)
 
     All extension operations handle both TensorHandle and Python int types
     for interpreter mode compatibility.
@@ -592,6 +593,31 @@ class AscendInterpreterBuilder(InterpreterBuilder):
         :param event_id: Event ID (int, constexpr, or TensorHandle)
         """
         # No-op in interpreter mode: single-threaded execution doesn't need sync
+        pass
+
+    def get_next_task(self, core):
+        """
+        Notify the scheduler that the current task can overlap with the next task.
+
+        In Interpreter mode, this is a no-op: task overlap is not simulated and
+        programs are executed sequentially in program order.
+
+        :param core: Owning core type (CORE enum value or None)
+        """
+        # No-op in interpreter mode: single-threaded execution has no task scheduling
+        pass
+
+    def wait_prev_task(self, pipe, core):
+        """
+        Wait for the previous task to finish executing on the given pipe.
+
+        In Interpreter mode, this is a no-op: task overlap is not simulated and
+        programs are executed sequentially in program order.
+
+        :param pipe: Pipe value to wait on
+        :param core: Owning core type (CORE enum value or None)
+        """
+        # No-op in interpreter mode: single-threaded execution has no task scheduling
         pass
 
     def get_int1_ty(self):
