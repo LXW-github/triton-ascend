@@ -1130,6 +1130,10 @@ def _is_register_based_target_arch(arch: str) -> bool:
         ("Ascend910_95", "Ascend950")))
 
 
+def _is_a6_target_arch(arch: str) -> bool:
+    return isinstance(arch, str) and arch.startswith(("Ascend910_96", "Ascend960"))
+
+
 def _get_libdevice_compile_state() -> bool:
     return bool(os.getenv("TRITON_ENABLE_LIBDEVICE", False))
 
@@ -1558,8 +1562,12 @@ class AscendBackend(BaseBackend):
             options = NPUOptions(arch=self.target.arch, **args)
             # Lazy init enable_dynamic_cv_pipeline if not provided.
             # compile_on_910_95 is already resolved from the requested target.
+            # A6 (Ascend960) defaults to disabled: the ssbuffer (dynamic_cv_pipeline)
+            # injects cross-core PIPE_S sync that the A6 camodel cannot model,
+            # causing a deadlock for mix kernels. Users may still opt in explicitly.
             if options.enable_dynamic_cv_pipeline is None:
-                object.__setattr__(options, "enable_dynamic_cv_pipeline", options.compile_on_910_95)
+                default_enable = False if _is_a6_target_arch(self.target.arch) else options.compile_on_910_95
+                object.__setattr__(options, "enable_dynamic_cv_pipeline", default_enable)
             if not internal_options:
                 _normalize_bishengir_simt_optimization_for_context(options, normalized_opts)
                 # Community JIT rejects the legacy launch keyword "stream"
