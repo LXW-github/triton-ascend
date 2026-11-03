@@ -67,6 +67,8 @@ from .aux_ops import (
     multibuffer,
 )
 
+from .task_overlap import task_overlap
+
 from .vec_ops import (
     insert_slice,
     extract_slice,
@@ -148,6 +150,7 @@ __all__ = [
     "parallel",
     "compile_hint",
     "multibuffer",
+    "task_overlap",
 
     # vec ops
     "insert_slice",

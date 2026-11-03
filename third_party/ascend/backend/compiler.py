@@ -488,6 +488,9 @@ def _parse_linalg_metadata(linalg: str, metadata: dict):
     # Example: parallel_mode = "mix_simd_simt" -> mix_simd_simt
     PARALLEL_MODE_REGEX = r'parallel_mode\s*=\s*"([^"]+)"'
 
+    # Example: hivm.task_overlap = "independent" -> independent
+    TASK_OVERLAP_REGEX = r'hivm\.task_overlap\s*=\s*"([^"]+)"'
+
     # Example: func.func @gather_sorted_kernel(%arg0: ...) -> gather_sorted_kernel
     KERNEL_NAME_REGEX = r"func\.func\s+@(\w+)"
 
@@ -525,6 +528,20 @@ def _parse_linalg_metadata(linalg: str, metadata: dict):
     # the mix mode is also encoded into metadata['name'] for runtime to distinguish
     metadata["mix_mode"] = re.search(MIX_MODE_REGEX, linalg).group(1)
     metadata["parallel_mode"] = re.search(PARALLEL_MODE_REGEX, linalg).group(1)
+    # `@task_overlap(...)` enables the BMU early-start pipeline for this kernel.
+    # The BMU plan and the task-control lowering are A6-only; other targets keep
+    # their normal pipeline instead of silently changing the memory planner.
+    # The BMU planner also only owns the local UB allocations when workspace
+    # multibuffering is disabled, so force it here.
+    task_overlap = re.search(TASK_OVERLAP_REGEX, linalg)
+    metadata["task_overlap"] = task_overlap.group(1) if task_overlap else None
+    if metadata["task_overlap"] is not None:
+        if _is_a6_target_arch(metadata["target"].arch):
+            metadata["set_workspace_multibuffer"] = 0
+        else:
+            metadata["task_overlap"] = None
+            print(f"warning: task_overlap is only supported on A6 targets, "
+                  f"ignoring it for {metadata['target'].arch}")
     metadata["kernel_name"] = re.search(KERNEL_NAME_REGEX, linalg).group(1)
     # Check the function load_binary in npu_driver.py.
     metadata["name"] = metadata["kernel_name"]
@@ -568,10 +585,19 @@ def _parse_ttir_metadata(ttir: str, metadata: dict):
     return metadata
 
 
+def get_task_overlap_compile_options(metadata):
+    # `@task_overlap(...)` needs both the BMU plan (group the local UB
+    # allocations into Main/Tail) and the early-start task control (insert the
+    # handoff and the wait).
+    if metadata.get("task_overlap") is None:
+        return []
+    return ["--enable-bmu-plan=true", "--enable-early-start=true"]
+
+
 def get_common_bishengir_compile_options(metadata):
     bishengir_target = metadata['target'].arch
     bishengir_target_opt = f"--target={bishengir_target}"
-    return [bishengir_target_opt]
+    return [bishengir_target_opt] + get_task_overlap_compile_options(metadata)
 
 
 @functools.lru_cache()
