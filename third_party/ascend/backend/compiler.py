@@ -591,14 +591,7 @@ def get_task_overlap_compile_options(metadata):
     # handoff and the wait).
     if metadata.get("task_overlap") is None:
         return []
-    return [
-        "--enable-bmu-plan=true",
-        "--enable-early-start=true",
-        # The kernel closes on the task-level handoff (get_next_task /
-        # wait_prev_task), so the full PIPE_ALL drain before the device entry
-        # return is redundant. A6-only, like the early-start pipeline itself.
-        "--disable-hivm-kernel-end-barrier",
-    ]
+    return ["--enable-bmu-plan=true", "--enable-early-start=true"]
 
 
 def get_common_bishengir_compile_options(metadata):
@@ -737,6 +730,16 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
         disable_tightly_coupled_buffer_reuse = metadata["disable_tightly_coupled_buffer_reuse"]
         if disable_tightly_coupled_buffer_reuse:
             _compile_option_list += ["--disable-tightly-coupled-buffer-reuse"]
+
+        # Standalone switch, independent of any kernel attribute. The HIVM
+        # barrier drain is only removable on A6, so keep the flag off the
+        # command line on other targets.
+        if metadata["disable_hivm_kernel_end_barrier"]:
+            if _is_a6_target_arch(opt.target_arch):
+                _compile_option_list += ["--disable-hivm-kernel-end-barrier"]
+            else:
+                print(f"warning: disable_hivm_kernel_end_barrier is only supported on A6 targets, "
+                      f"ignoring it for {opt.target_arch}")
 
         _compile_option_list += [
             f"--enable-auto-bind-sub-block={get_auto_bind_sub_block_option(metadata)}",
@@ -1249,6 +1252,9 @@ class NPUOptions:
     enable_preload: bool = None
     enable_auto_bind_sub_block: bool = None
     disable_tightly_coupled_buffer_reuse: bool = False
+    # Skip the PIPE_ALL drain inserted before the device entry return. A6 only:
+    # the kernel is expected to close on task-level ordering instead.
+    disable_hivm_kernel_end_barrier: bool = False
     enable_hivm_auto_cv_balance: bool = None
     # Temporary 910_95 switch; the NPU compiler plans to make this default in Q4.
     enable_hivm_batch_matmul: bool = False
