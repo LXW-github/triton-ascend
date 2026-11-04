@@ -591,7 +591,14 @@ def get_task_overlap_compile_options(metadata):
     # handoff and the wait).
     if metadata.get("task_overlap") is None:
         return []
-    return ["--enable-bmu-plan=true", "--enable-early-start=true"]
+    return [
+        "--enable-bmu-plan=true",
+        "--enable-early-start=true",
+        # The kernel closes on the task-level handoff (get_next_task /
+        # wait_prev_task), so the full PIPE_ALL drain before the device entry
+        # return is redundant. A6-only, like the early-start pipeline itself.
+        "--disable-hivm-kernel-end-barrier",
+    ]
 
 
 def get_common_bishengir_compile_options(metadata):
