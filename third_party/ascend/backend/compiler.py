@@ -488,9 +488,6 @@ def _parse_linalg_metadata(linalg: str, metadata: dict):
     # Example: parallel_mode = "mix_simd_simt" -> mix_simd_simt
     PARALLEL_MODE_REGEX = r'parallel_mode\s*=\s*"([^"]+)"'
 
-    # Example: hivm.task_overlap = "independent" -> independent
-    TASK_OVERLAP_REGEX = r'hivm\.task_overlap\s*=\s*"([^"]+)"'
-
     # Example: func.func @gather_sorted_kernel(%arg0: ...) -> gather_sorted_kernel
     KERNEL_NAME_REGEX = r"func\.func\s+@(\w+)"
 
@@ -528,20 +525,22 @@ def _parse_linalg_metadata(linalg: str, metadata: dict):
     # the mix mode is also encoded into metadata['name'] for runtime to distinguish
     metadata["mix_mode"] = re.search(MIX_MODE_REGEX, linalg).group(1)
     metadata["parallel_mode"] = re.search(PARALLEL_MODE_REGEX, linalg).group(1)
-    # `@task_overlap(...)` enables the BMU early-start pipeline for this kernel.
-    # The BMU plan and the task-control lowering are A6-only; other targets keep
-    # their normal pipeline instead of silently changing the memory planner.
-    # The BMU planner also only owns the local UB allocations when workspace
-    # multibuffering is disabled, so force it here.
-    task_overlap = re.search(TASK_OVERLAP_REGEX, linalg)
-    metadata["task_overlap"] = task_overlap.group(1) if task_overlap else None
-    if metadata["task_overlap"] is not None:
-        if _is_a6_target_arch(metadata["target"].arch):
-            metadata["set_workspace_multibuffer"] = 0
+    # The BMU ring planner and the early-start handoff are A6 features, and the
+    # HIVM pipeline only gives the local UB allocations to the BMU planner when
+    # workspace multibuffering is disabled, so force that here. `@task_overlap`
+    # is not a switch: it only records the per-kernel wait position and stays
+    # inert unless the pipeline is requested through these options.
+    if metadata.get("enable_bmu_plan") or metadata.get("enable_early_start"):
+        if not _is_a6_target_arch(metadata["target"].arch):
+            metadata["enable_bmu_plan"] = None
+            metadata["enable_early_start"] = None
+            print(f"warning: enable_bmu_plan/enable_early_start are only supported "
+                  f"on A6 targets, ignoring them for {metadata['target'].arch}")
         else:
-            metadata["task_overlap"] = None
-            print(f"warning: task_overlap is only supported on A6 targets, "
-                  f"ignoring it for {metadata['target'].arch}")
+            metadata["set_workspace_multibuffer"] = 0
+            if metadata.get("enable_early_start") and not metadata.get("enable_bmu_plan"):
+                print("warning: enable_early_start requires enable_bmu_plan; the "
+                      "early-start handoff is inserted by the BMU-plan pipeline")
     metadata["kernel_name"] = re.search(KERNEL_NAME_REGEX, linalg).group(1)
     # Check the function load_binary in npu_driver.py.
     metadata["name"] = metadata["kernel_name"]
@@ -585,19 +584,10 @@ def _parse_ttir_metadata(ttir: str, metadata: dict):
     return metadata
 
 
-def get_task_overlap_compile_options(metadata):
-    # `@task_overlap(...)` needs both the BMU plan (group the local UB
-    # allocations into Main/Tail) and the early-start task control (insert the
-    # handoff and the wait).
-    if metadata.get("task_overlap") is None:
-        return []
-    return ["--enable-bmu-plan=true", "--enable-early-start=true"]
-
-
 def get_common_bishengir_compile_options(metadata):
     bishengir_target = metadata['target'].arch
     bishengir_target_opt = f"--target={bishengir_target}"
-    return [bishengir_target_opt] + get_task_overlap_compile_options(metadata)
+    return [bishengir_target_opt]
 
 
 @functools.lru_cache()
@@ -740,6 +730,15 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
             else:
                 print(f"warning: disable_hivm_kernel_end_barrier is only supported on A6 targets, "
                       f"ignoring it for {opt.target_arch}")
+
+        # BMU ring planner and the early-start handoff. Both are A6-only;
+        # _parse_linalg_metadata has already dropped them on other targets.
+        enable_bmu_plan = metadata.get("enable_bmu_plan")
+        if enable_bmu_plan is not None:
+            _compile_option_list += [f"--enable-bmu-plan={enable_bmu_plan}"]
+        enable_early_start = metadata.get("enable_early_start")
+        if enable_early_start is not None:
+            _compile_option_list += [f"--enable-early-start={enable_early_start}"]
 
         _compile_option_list += [
             f"--enable-auto-bind-sub-block={get_auto_bind_sub_block_option(metadata)}",
@@ -1285,6 +1284,13 @@ class NPUOptions:
 
     # plan memory strategy: "default" (default) or "largest-first"
     plan_memory_strategy: str = None
+    # A6-only BMU ring planner for the local UB allocations.
+    enable_bmu_plan: bool = None
+    # A6-only early-start handoff: classify the local UB allocations as Main or
+    # Tail and insert the task-control pair. Needs `enable_bmu_plan`, because
+    # the handoff is inserted by the BMU-plan pipeline, and forces
+    # `set_workspace_multibuffer=0` (derived in _parse_linalg_metadata).
+    enable_early_start: bool = None
     # Internal launch metadata.  The mode is initially derived from
     # compile_mode, then replaced with the mode emitted by TritonToLinalg.
     parallel_mode: str = field(default="simd", init=False)

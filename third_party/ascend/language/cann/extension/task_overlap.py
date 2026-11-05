@@ -35,12 +35,14 @@ class TaskOverlapConfig:
 
 
 def task_overlap(depends_on_prev: bool = True):
-    """Let this kernel participate in the BMU early-start task handoff.
+    """Record where this kernel may wait for its predecessor.
 
-    The decorator is the frontend half of the early-start design: the kernel is
-    compiled with the BMU planner and the early-start grouping, so its Main
-    allocation can be returned while its Tail output is still being written
-    back, and the successor task is dispatched before this one drains.
+    The decorator only emits the per-kernel hint ``hivm.task_overlap``; it does
+    not switch on the early-start pipeline. Compile the kernel with
+    ``enable_early_start=True`` (together with ``enable_bmu_plan=True``) to let
+    the BMU planner return the Main allocation while the Tail output is still
+    being written back and dispatch the successor task before this one drains.
+    Without that pipeline the hint is inert.
 
     ``depends_on_prev`` states whether this kernel reads the output of the task
     that ran before it:

@@ -122,8 +122,10 @@ def _apply_ascend_patch():
     # Emit the `@al.task_overlap(...)` hint as a module attribute. The kernel
     # module becomes the `func.func` input of AscendNPU-IR, where
     # `hivm-early-start-task-control` reads it: "depends" keeps the entry wait,
-    # "independent" moves it before the Tail allocation. The attribute is part
-    # of the source settings, so the compilation cache key must include it too.
+    # "independent" moves it before the Tail allocation. The hint does not
+    # enable the pipeline by itself; `enable_early_start` does. The attribute is
+    # part of the source settings, so the compilation cache key must include it
+    # too.
     if not getattr(_compiler_module, "_ascend_task_overlap_patch_applied", False):
         import hashlib
         from triton._C.libtriton import ir as _ir
