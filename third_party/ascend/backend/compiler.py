@@ -525,6 +525,22 @@ def _parse_linalg_metadata(linalg: str, metadata: dict):
     # the mix mode is also encoded into metadata['name'] for runtime to distinguish
     metadata["mix_mode"] = re.search(MIX_MODE_REGEX, linalg).group(1)
     metadata["parallel_mode"] = re.search(PARALLEL_MODE_REGEX, linalg).group(1)
+    # The BMU ring planner and the early-start handoff are A6 features, and the
+    # HIVM pipeline only gives the local UB allocations to the BMU planner when
+    # workspace multibuffering is disabled, so force that here. `@task_overlap`
+    # is not a switch: it only records the per-kernel wait position and stays
+    # inert unless the pipeline is requested through these options.
+    if metadata.get("enable_bmu_plan") or metadata.get("enable_early_start"):
+        if not _is_a6_target_arch(metadata["target"].arch):
+            metadata["enable_bmu_plan"] = None
+            metadata["enable_early_start"] = None
+            print(f"warning: enable_bmu_plan/enable_early_start are only supported "
+                  f"on A6 targets, ignoring them for {metadata['target'].arch}")
+        else:
+            metadata["set_workspace_multibuffer"] = 0
+            if metadata.get("enable_early_start") and not metadata.get("enable_bmu_plan"):
+                print("warning: enable_early_start requires enable_bmu_plan; the "
+                      "early-start handoff is inserted by the BMU-plan pipeline")
     metadata["kernel_name"] = re.search(KERNEL_NAME_REGEX, linalg).group(1)
     # Check the function load_binary in npu_driver.py.
     metadata["name"] = metadata["kernel_name"]
@@ -704,6 +720,25 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
         disable_tightly_coupled_buffer_reuse = metadata["disable_tightly_coupled_buffer_reuse"]
         if disable_tightly_coupled_buffer_reuse:
             _compile_option_list += ["--disable-tightly-coupled-buffer-reuse"]
+
+        # Standalone switch, independent of any kernel attribute. The HIVM
+        # barrier drain is only removable on A6, so keep the flag off the
+        # command line on other targets.
+        if metadata["disable_hivm_kernel_end_barrier"]:
+            if _is_a6_target_arch(opt.target_arch):
+                _compile_option_list += ["--disable-hivm-kernel-end-barrier"]
+            else:
+                print(f"warning: disable_hivm_kernel_end_barrier is only supported on A6 targets, "
+                      f"ignoring it for {opt.target_arch}")
+
+        # BMU ring planner and the early-start handoff. Both are A6-only;
+        # _parse_linalg_metadata has already dropped them on other targets.
+        enable_bmu_plan = metadata.get("enable_bmu_plan")
+        if enable_bmu_plan is not None:
+            _compile_option_list += [f"--enable-bmu-plan={enable_bmu_plan}"]
+        enable_early_start = metadata.get("enable_early_start")
+        if enable_early_start is not None:
+            _compile_option_list += [f"--enable-early-start={enable_early_start}"]
 
         _compile_option_list += [
             f"--enable-auto-bind-sub-block={get_auto_bind_sub_block_option(metadata)}",
@@ -1216,6 +1251,9 @@ class NPUOptions:
     enable_preload: bool = None
     enable_auto_bind_sub_block: bool = None
     disable_tightly_coupled_buffer_reuse: bool = False
+    # Skip the PIPE_ALL drain inserted before the device entry return. A6 only:
+    # the kernel is expected to close on task-level ordering instead.
+    disable_hivm_kernel_end_barrier: bool = False
     enable_hivm_auto_cv_balance: bool = None
     # Temporary 910_95 switch; the NPU compiler plans to make this default in Q4.
     enable_hivm_batch_matmul: bool = False
@@ -1246,6 +1284,13 @@ class NPUOptions:
 
     # plan memory strategy: "default" (default) or "largest-first"
     plan_memory_strategy: str = None
+    # A6-only BMU ring planner for the local UB allocations.
+    enable_bmu_plan: bool = None
+    # A6-only early-start handoff: classify the local UB allocations as Main or
+    # Tail and insert the task-control pair. Needs `enable_bmu_plan`, because
+    # the handoff is inserted by the BMU-plan pipeline, and forces
+    # `set_workspace_multibuffer=0` (derived in _parse_linalg_metadata).
+    enable_early_start: bool = None
     # Internal launch metadata.  The mode is initially derived from
     # compile_mode, then replaced with the mode emitted by TritonToLinalg.
     parallel_mode: str = field(default="simd", init=False)
