@@ -243,6 +243,16 @@ def _finalize_program_launch_policy(metadata, opt):
     if auto_blockify_enabled and ptsm_cap_authorized:
         raise RuntimeError("AutoBlockify and persistent-grid cap cannot both be enabled")
 
+    # `disable_auto_blockify_loop` is the explicit escape hatch for kernels whose
+    # head sequence must stay flat: blocking wraps the body in a grid-stride loop,
+    # which is exactly what the early-start handoff needs to avoid. Honour it here
+    # so every consumer of auto_blockify_enabled (all three compile paths) agrees.
+    if metadata.get("disable_auto_blockify_loop"):
+        if auto_blockify_enabled:
+            print("warning: disable_auto_blockify_loop is set, skipping "
+                  "AutoBlockifyParallelLoop for this kernel")
+        auto_blockify_enabled = False
+
     metadata["auto_blockify_enabled"] = auto_blockify_enabled
     metadata["ptsm_cap_authorized"] = ptsm_cap_authorized
 
@@ -541,6 +551,14 @@ def _parse_linalg_metadata(linalg: str, metadata: dict):
             if metadata.get("enable_early_start") and not metadata.get("enable_bmu_plan"):
                 print("warning: enable_early_start requires enable_bmu_plan; the "
                       "early-start handoff is inserted by the BMU-plan pipeline")
+    # Early start and loop blocking both rewrite the per-launch head sequence,
+    # so they must not be combined by default: blocking wraps the kernel body in
+    # a grid-stride loop, which moves the task-control instructions the handoff
+    # needs in the entry block, and the head cost the two changes save does not
+    # add up. Early start therefore turns blocking off unless the caller asks
+    # for the combination explicitly with auto_blockify_with_early_start.
+    if metadata.get("enable_early_start") and not metadata.get("auto_blockify_with_early_start"):
+        metadata["disable_auto_blockify_loop"] = True
     metadata["kernel_name"] = re.search(KERNEL_NAME_REGEX, linalg).group(1)
     # Check the function load_binary in npu_driver.py.
     metadata["name"] = metadata["kernel_name"]
@@ -1254,6 +1272,17 @@ class NPUOptions:
     # Skip the PIPE_ALL drain inserted before the device entry return. A6 only:
     # the kernel is expected to close on task-level ordering instead.
     disable_hivm_kernel_end_barrier: bool = False
+    # Keep AutoBlockifyParallelLoop out of the compilation. Blocking wraps the
+    # kernel body in a grid-stride loop, which changes both where the early-start
+    # task-control instructions can land (the handoff needs them in the entry
+    # block) and the per-launch head sequence, so the two interact. Off by
+    # default: it is an explicit experiment dimension, not implied by
+    # enable_early_start.
+    disable_auto_blockify_loop: bool = False
+    # Early start turns loop blocking off on its own (the two changes both
+    # rewrite the per-launch head sequence and must not be combined by default).
+    # Set this to keep blocking on anyway, e.g. to measure the combination.
+    auto_blockify_with_early_start: bool = False
     enable_hivm_auto_cv_balance: bool = None
     # Temporary 910_95 switch; the NPU compiler plans to make this default in Q4.
     enable_hivm_batch_matmul: bool = False
@@ -1516,7 +1545,23 @@ def ttir_to_npubin(mod, metadata, opt):
             if bisheng_options is not None:
                 _compile_option_list += [f"--append-bisheng-options={bisheng_options}"]
 
-            if _is_auto_map_parallel_blocks_enabled() and not metadata.get("row_coalescing_applied", False):
+            # Mirror the A6 path: BMU ring allocator / Main-Tail early start.
+            if metadata.get("enable_bmu_plan"):
+                _compile_option_list += ["--enable-bmu-plan=true"]
+            if metadata.get("enable_early_start"):
+                _compile_option_list += ["--enable-early-start=true"]
+            # Mirror the A6 path: the kernel-end drain is only removable where
+            # the task-level ordering exists.
+            if metadata.get("disable_hivm_kernel_end_barrier"):
+                if _is_a6_target_arch(opt.target_arch):
+                    _compile_option_list += ["--disable-hivm-kernel-end-barrier=true"]
+                else:
+                    print(f"warning: disable_hivm_kernel_end_barrier is only supported on A6 "
+                          f"targets, ignoring it for {opt.target_arch}")
+
+            if (_is_auto_map_parallel_blocks_enabled()
+                    and not metadata.get("row_coalescing_applied", False)
+                    and not metadata.get("disable_auto_blockify_loop")):
                 _compile_option_list += ["--enable-auto-blockify-loop"]
                 if opt.superblock_factor > 1:
                     _compile_option_list += [f"--super-block-factor={opt.superblock_factor}"]
