@@ -550,7 +550,9 @@ def _parse_linalg_metadata(linalg: str, metadata: dict):
             metadata["set_workspace_multibuffer"] = 0
             if metadata.get("enable_early_start") and not metadata.get("enable_bmu_plan"):
                 print("warning: enable_early_start requires enable_bmu_plan; the "
-                      "early-start handoff is inserted by the BMU-plan pipeline")
+                      "early-start handoff is inserted by the BMU-plan pipeline, "
+                      "enabling it")
+                metadata["enable_bmu_plan"] = True
     # Early start and loop blocking both rewrite the per-launch head sequence,
     # so they must not be combined by default: blocking wraps the kernel body in
     # a grid-stride loop, which moves the task-control instructions the handoff
