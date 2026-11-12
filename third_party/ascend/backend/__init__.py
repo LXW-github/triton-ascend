@@ -119,6 +119,55 @@ def _apply_ascend_patch():
         except Exception as e:
             logging.warning(f"[Ascend Patch] Failed to install dtype guard: {e}")
 
+    # Emit the `@al.task_overlap(...)` hint as a module attribute. The kernel
+    # module becomes the `func.func` input of AscendNPU-IR, where
+    # `hivm-auto-insert-early-start-instruction` reads it: "depends" keeps the entry wait,
+    # "independent" moves it before the Tail allocation. The hint does not
+    # enable the pipeline by itself; `enable_auto_early_start` does. The attribute is
+    # part of the source settings, so the compilation cache key must include it
+    # too.
+    if not getattr(_compiler_module, "_ascend_task_overlap_patch_applied", False):
+        import hashlib
+        from triton._C.libtriton import ir as _ir
+        from triton.compiler.compiler import ASTSource
+
+        task_overlap_attr = "_ascend_task_overlap"
+
+        def _get_task_overlap(fn):
+            # The decorator can be applied above `@triton.jit` (attribute on the
+            # JITFunction) or below it (attribute on the wrapped Python function).
+            for candidate in (fn, getattr(fn, "fn", None)):
+                if candidate is None:
+                    continue
+                config = getattr(candidate, task_overlap_attr, None)
+                if config is not None:
+                    return config
+            return None
+
+        _original_make_ir = ASTSource.make_ir
+
+        def _patched_make_ir(self, *args, **kwargs):
+            module = _original_make_ir(self, *args, **kwargs)
+            config = _get_task_overlap(self.fn)
+            if config is not None:
+                builder = _ir.builder(module.context)
+                value = "depends" if config.depends_on_prev else "independent"
+                module.set_attr("hivm.task_overlap", builder.get_string_attr(value))
+            return module
+
+        _original_ast_hash = ASTSource.hash
+
+        def _patched_ast_hash(self):
+            key = _original_ast_hash(self)
+            config = _get_task_overlap(self.fn)
+            if config is None:
+                return key
+            return hashlib.sha256(f"{key}:{config.depends_on_prev}".encode("utf-8")).hexdigest()
+
+        ASTSource.make_ir = _patched_make_ir
+        ASTSource.hash = _patched_ast_hash
+        _compiler_module._ascend_task_overlap_patch_applied = True
+
 
 from .knobs import install_ascend_knobs as _install_ascend_knobs
 
