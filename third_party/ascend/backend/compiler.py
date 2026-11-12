@@ -243,6 +243,16 @@ def _finalize_program_launch_policy(metadata, opt):
     if auto_blockify_enabled and ptsm_cap_authorized:
         raise RuntimeError("AutoBlockify and persistent-grid cap cannot both be enabled")
 
+    # `disable_auto_blockify_loop` is the explicit escape hatch for kernels whose
+    # head sequence must stay flat: blocking wraps the body in a grid-stride loop,
+    # which is exactly what the early-start handoff needs to avoid. Honour it here
+    # so every consumer of auto_blockify_enabled (all three compile paths) agrees.
+    if metadata.get("disable_auto_blockify_loop"):
+        if auto_blockify_enabled:
+            print("warning: disable_auto_blockify_loop is set, skipping "
+                  "AutoBlockifyParallelLoop for this kernel")
+        auto_blockify_enabled = False
+
     metadata["auto_blockify_enabled"] = auto_blockify_enabled
     metadata["ptsm_cap_authorized"] = ptsm_cap_authorized
 
@@ -462,6 +472,55 @@ def __get_metadata_attr_by_callback(lib, postfix: str, metadata, meta_key: str):
         metadata[meta_key] = callback_func()
 
 
+def _parse_task_control_metadata(ir_text, metadata):
+    ir_text = re.sub(r"//[^\n]*", "", ir_text)
+    metadata["has_wait_prev_task"] = bool(re.search(
+        r'(?m)^\s*(?:hivm\.hir\.wait_prev_task(?=\s|\[|\()|"hivm\.hir\.wait_prev_task"\s*\()', ir_text))
+    depends = bool(re.search(r'\bhivm\.task_overlap\s*=\s*"depends"', ir_text))
+    if metadata["has_wait_prev_task"] or depends:
+        metadata["enable_auto_early_start"] = False
+    if any(metadata.get(key) for key in ("enable_bmu_plan", "enable_auto_early_start", "enable_early_start")):
+        if not _is_a6_target_arch(metadata["target"].arch):
+            for key in ("enable_bmu_plan", "enable_auto_early_start", "enable_early_start"):
+                metadata[key] = None
+            print(f"warning: BMU and early start are only supported on A6 targets, "
+                  f"ignoring them for {metadata['target'].arch}")
+            return
+    if metadata.get("enable_auto_early_start"):
+        metadata["enable_bmu_plan"] = True
+        metadata["disable_hivm_kernel_end_barrier"] = True
+        if not metadata.get("auto_blockify_with_early_start"):
+            metadata["disable_auto_blockify_loop"] = True
+    if metadata.get("enable_bmu_plan"):
+        metadata["set_workspace_multibuffer"] = 0
+
+
+def _set_bisheng_mllvm_option(options, name, value):
+    tokens = (options or "").split()
+    kept = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] == "-mllvm" and i + 1 < len(tokens) and tokens[i + 1].lstrip("-").split("=", 1)[0] == name:
+            i += 1
+        if tokens[i].lstrip("-").split("=", 1)[0] == name:
+            if "=" not in tokens[i] and i + 1 < len(tokens) and tokens[i + 1] in ("true", "false"):
+                i += 1
+        else:
+            kept.append(tokens[i])
+        i += 1
+    kept.extend(("-mllvm", f"--{name}={str(value).lower()}"))
+    return " ".join(kept)
+
+
+def _task_control_bisheng_options(metadata):
+    options = metadata.get("bisheng_options")
+    if metadata.get("enable_early_start") is not None:
+        options = _set_bisheng_mllvm_option(options, "early-start-enable", metadata["enable_early_start"])
+    if metadata.get("has_wait_prev_task"):
+        options = _set_bisheng_mllvm_option(options, "cce-insert-wait-prev-task-enable", False)
+    return options
+
+
 def _parse_linalg_metadata(linalg: str, metadata: dict):
     """
     Parse Linalg IR to extract metadata required for NPU compilation.
@@ -525,6 +584,7 @@ def _parse_linalg_metadata(linalg: str, metadata: dict):
     # the mix mode is also encoded into metadata['name'] for runtime to distinguish
     metadata["mix_mode"] = re.search(MIX_MODE_REGEX, linalg).group(1)
     metadata["parallel_mode"] = re.search(PARALLEL_MODE_REGEX, linalg).group(1)
+    _parse_task_control_metadata(linalg, metadata)
     metadata["kernel_name"] = re.search(KERNEL_NAME_REGEX, linalg).group(1)
     # Check the function load_binary in npu_driver.py.
     metadata["name"] = metadata["kernel_name"]
@@ -563,6 +623,7 @@ def _parse_ttir_metadata(ttir: str, metadata: dict):
     # Keep this as compiler-derived safety metadata.  In particular, do not
     # trust a caller-provided False value to override an unsafe TTIR pattern.
     metadata["has_auto_blockify_blacklist_op"] = bool(_get_auto_blockify_blacklist_reasons(ttir))
+    _parse_task_control_metadata(ttir, metadata)
     # Parse all tensor kinds from arguments
     metadata["tensor_kinds"] = [int(kind) for _, kind in re.findall(TENSOR_KIND_REGEX, ttir)]
     return metadata
@@ -715,6 +776,15 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
                 print(f"warning: disable_hivm_kernel_end_barrier is only supported on A6 targets, "
                       f"ignoring it for {opt.target_arch}")
 
+        # BMU ring planner and the early-start handoff. Both are A6-only;
+        # _parse_linalg_metadata has already dropped them on other targets.
+        enable_bmu_plan = metadata.get("enable_bmu_plan")
+        if enable_bmu_plan is not None:
+            _compile_option_list += [f"--enable-bmu-plan={enable_bmu_plan}"]
+        enable_auto_early_start = metadata.get("enable_auto_early_start")
+        if enable_auto_early_start is not None:
+            _compile_option_list += [f"--enable-auto-early-start={enable_auto_early_start}"]
+
         _compile_option_list += [
             f"--enable-auto-bind-sub-block={get_auto_bind_sub_block_option(metadata)}",
         ]
@@ -838,7 +908,7 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
                 _compile_option_list += ["--enable-hivm-batch-matmul"]
             if metadata.get("enable_vf_stack_limit"):
                 _compile_option_list += ["--enable-vf-stack-limit"]
-        bisheng_options = metadata["bisheng_options"]
+        bisheng_options = _task_control_bisheng_options(metadata)
         if bisheng_options is not None:
             _compile_option_list += [f"--append-bisheng-options={bisheng_options}"]
         if opt.debug:
@@ -1229,6 +1299,17 @@ class NPUOptions:
     # Skip the PIPE_ALL drain inserted before the device entry return. A6 only:
     # the kernel is expected to close on task-level ordering instead.
     disable_hivm_kernel_end_barrier: bool = False
+    # Keep AutoBlockifyParallelLoop out of the compilation. Blocking wraps the
+    # kernel body in a grid-stride loop, which changes both where the early-start
+    # task-control instructions can land (the handoff needs them in the entry
+    # block) and the per-launch head sequence, so the two interact. Off by
+    # default: it is an explicit experiment dimension, not implied by
+    # enable_auto_early_start.
+    disable_auto_blockify_loop: bool = False
+    # Early start turns loop blocking off on its own (the two changes both
+    # rewrite the per-launch head sequence and must not be combined by default).
+    # Set this to keep blocking on anyway, e.g. to measure the combination.
+    auto_blockify_with_early_start: bool = False
     enable_hivm_auto_cv_balance: bool = None
     # Temporary 910_95 switch; the NPU compiler plans to make this default in Q4.
     enable_hivm_batch_matmul: bool = False
@@ -1259,6 +1340,15 @@ class NPUOptions:
 
     # plan memory strategy: "default" (default) or "largest-first"
     plan_memory_strategy: str = None
+    # A6-only BMU ring planner for the local UB allocations.
+    enable_bmu_plan: bool = None
+    # A6-only early-start handoff: classify the local UB allocations as Main or
+    # Tail and insert the task-control pair. Needs `enable_bmu_plan`, because
+    # the handoff is inserted by the BMU-plan pipeline, and forces
+    # `set_workspace_multibuffer=0` (derived in _parse_linalg_metadata).
+    enable_auto_early_start: bool = None
+    # Control the downstream BiSheng --early-start-enable switch.
+    enable_early_start: bool = None
     # Internal launch metadata.  The mode is initially derived from
     # compile_mode, then replaced with the mode emitted by TritonToLinalg.
     parallel_mode: str = field(default="simd", init=False)
@@ -1480,10 +1570,15 @@ def ttir_to_npubin(mod, metadata, opt):
                         f"--custom-aiv-number={npu_utils.get_aivector_core_num()}",
                     ]
 
-            bisheng_options = metadata["bisheng_options"]
+            bisheng_options = _task_control_bisheng_options(metadata)
             if bisheng_options is not None:
                 _compile_option_list += [f"--append-bisheng-options={bisheng_options}"]
 
+            # Mirror the A6 path: BMU ring allocator / Main-Tail early start.
+            if metadata.get("enable_bmu_plan"):
+                _compile_option_list += ["--enable-bmu-plan=true"]
+            if metadata.get("enable_auto_early_start"):
+                _compile_option_list += ["--enable-auto-early-start=true"]
             # Mirror the A6 path: the kernel-end drain is only removable where
             # the task-level ordering exists.
             if metadata.get("disable_hivm_kernel_end_barrier"):
@@ -1493,7 +1588,9 @@ def ttir_to_npubin(mod, metadata, opt):
                     print(f"warning: disable_hivm_kernel_end_barrier is only supported on A6 "
                           f"targets, ignoring it for {opt.target_arch}")
 
-            if _is_auto_map_parallel_blocks_enabled() and not metadata.get("row_coalescing_applied", False):
+            if (_is_auto_map_parallel_blocks_enabled()
+                    and not metadata.get("row_coalescing_applied", False)
+                    and not metadata.get("disable_auto_blockify_loop")):
                 _compile_option_list += ["--enable-auto-blockify-loop"]
                 if opt.superblock_factor > 1:
                     _compile_option_list += [f"--super-block-factor={opt.superblock_factor}"]
