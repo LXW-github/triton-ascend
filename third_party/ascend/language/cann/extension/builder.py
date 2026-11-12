@@ -81,6 +81,8 @@ def setup_unified_builder(main_builder, ascend_builder):
         "sync_block_wait",
         "create_convert_layout",
         'sync_block_all',
+        "get_next_task",
+        "wait_prev_task",
         'create_custom_op',
         'create_custom_macro_op',
         'get_core_type_attr',
