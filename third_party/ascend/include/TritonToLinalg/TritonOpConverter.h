@@ -348,12 +348,16 @@ protected:
               return rewriter.getIntegerAttr(constantType, 1);
             })
             .template Case<arith::MaximumFOp, arith::MaxNumFOp>([&](auto) {
+              // [camodel workaround] use -FLT_MAX instead of -inf as the max
+              // reduce accumulator init to avoid VCGMAXv2 vec_err on -inf.
               return rewriter.getFloatAttr(
-                  constantType, -std::numeric_limits<float>::infinity());
+                  constantType, -std::numeric_limits<float>::max());
             })
             .template Case<arith::MinimumFOp, arith::MinNumFOp>([&](auto) {
+              // [camodel workaround] use +FLT_MAX instead of +inf as the min
+              // reduce accumulator init.
               return rewriter.getFloatAttr(
-                  constantType, std::numeric_limits<float>::infinity());
+                  constantType, std::numeric_limits<float>::max());
             })
             .Case([&](arith::MinSIOp) {
               return rewriter.getIntegerAttr(constantType,
