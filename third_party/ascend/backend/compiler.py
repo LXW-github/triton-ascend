@@ -705,6 +705,16 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
         if disable_tightly_coupled_buffer_reuse:
             _compile_option_list += ["--disable-tightly-coupled-buffer-reuse"]
 
+        # Standalone switch, independent of any kernel attribute. The HIVM
+        # barrier drain is only removable on A6, so keep the flag off the
+        # command line on other targets.
+        if metadata["disable_hivm_kernel_end_barrier"]:
+            if _is_a6_target_arch(opt.target_arch):
+                _compile_option_list += ["--disable-hivm-kernel-end-barrier"]
+            else:
+                print(f"warning: disable_hivm_kernel_end_barrier is only supported on A6 targets, "
+                      f"ignoring it for {opt.target_arch}")
+
         _compile_option_list += [
             f"--enable-auto-bind-sub-block={get_auto_bind_sub_block_option(metadata)}",
         ]
@@ -1216,6 +1226,9 @@ class NPUOptions:
     enable_preload: bool = None
     enable_auto_bind_sub_block: bool = None
     disable_tightly_coupled_buffer_reuse: bool = False
+    # Skip the PIPE_ALL drain inserted before the device entry return. A6 only:
+    # the kernel is expected to close on task-level ordering instead.
+    disable_hivm_kernel_end_barrier: bool = False
     enable_hivm_auto_cv_balance: bool = None
     # Temporary 910_95 switch; the NPU compiler plans to make this default in Q4.
     enable_hivm_batch_matmul: bool = False
@@ -1470,6 +1483,15 @@ def ttir_to_npubin(mod, metadata, opt):
             bisheng_options = metadata["bisheng_options"]
             if bisheng_options is not None:
                 _compile_option_list += [f"--append-bisheng-options={bisheng_options}"]
+
+            # Mirror the A6 path: the kernel-end drain is only removable where
+            # the task-level ordering exists.
+            if metadata.get("disable_hivm_kernel_end_barrier"):
+                if _is_a6_target_arch(opt.target_arch):
+                    _compile_option_list += ["--disable-hivm-kernel-end-barrier=true"]
+                else:
+                    print(f"warning: disable_hivm_kernel_end_barrier is only supported on A6 "
+                          f"targets, ignoring it for {opt.target_arch}")
 
             if _is_auto_map_parallel_blocks_enabled() and not metadata.get("row_coalescing_applied", False):
                 _compile_option_list += ["--enable-auto-blockify-loop"]
