@@ -235,3 +235,13 @@ Remove the following variables from launch scripts or the runtime environment; t
 | `TRITON_BACKEND` | The variable no longer selects Ascend backend policy. |
 | `TRITON_DISABLE_FFTS` | The compilation target determines FFTS policy. |
 | `TRITON_REGISTER_TENSOR_MSPROF` | Environment variables no longer control tensor-shape registration with msprof. |
+
+## Compile-time BMU and early-start fallback
+
+`enable_auto_early_start=True` places the AIV automatic `wait_prev_task` after the first BMU-backed GM-to-UB MTE2 input load by default, without an additional independent task-overlap hint. Post-sync finalization keeps a straight-line wait immediately after the load and before subsequent generated flags. This input must already be ready independently of unfinished predecessor output; BMU protects destination storage only. For such a data dependency, use `@task_overlap(depends_on_prev=True)` to disable automatic insertion, or place a manual wait before the dependent read.
+
+Synchronization, unknown side effects, conditional control flow, or a first load into non-BMU storage retain an entry wait. Loop loads retain first-iteration waits and zero-trip fallbacks. Generated loop synchronization that violates the task-wait-prefix constraint triggers the compilation fallback below.
+
+The A6 RegBase compilation path retries once from the original TTAdapter input and pre-attempt metadata when it receives a rejected BMU plan marker or a specific BMU, Tail-classification, or task-wait-prefix diagnostic. The retry disables `enable_bmu_plan`, `enable_auto_early_start`, and `enable_early_start`, restores the kernel-end barrier, and preserves the original multibuffer and AutoBlockify requests. Kernel metadata records the effective settings and `bmu_plan_fallback_reason`.
+
+The baseline requests `--enable-conservative-task-wait=true` from the matching AscendNPU-IR to insert an entry wait after synchronization, protecting static addresses from a predecessor's in-flight Tail. Kernels with a handwritten task wait are not retried automatically. Unrelated compilation failures and failures of the second attempt remain errors. This is compilation fallback, not recovery from a blocked device allocation; update the matching AscendNPU-IR as well.

@@ -309,6 +309,9 @@ def get_next_task(core=None, _semantic=None):
     while the current task is still draining. Pairs with :func:`wait_prev_task` in
     the successor task to enforce producer-consumer ordering on a specific pipe.
 
+    Temporarily discarded before NPU-IR compilation; BiSheng inserts the
+    scheduling request instead.
+
     :param core: Owning core type. Must be ``CORE.CUBE`` or ``CORE.VECTOR`` when
         specified; may be omitted in a pure AIC/AIV kernel and inferred later.
     :type core: CORE

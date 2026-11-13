@@ -235,3 +235,13 @@ triton.Config({"multibuffer_mode": {"gm": 1, "l1": 2, "l0c": 1, "ub": 1}})
 | `TRITON_BACKEND` | 该变量不再用于选择Ascend后端策略。 |
 | `TRITON_DISABLE_FFTS` | FFTS策略由编译目标决定。 |
 | `TRITON_REGISTER_TENSOR_MSPROF` | 不再通过环境变量控制msprof的张量形状注册。 |
+
+## BMU 与 early start 的编译期回退
+
+`enable_auto_early_start=True` 默认将 AIV 侧的自动 `wait_prev_task` 放在首个受 BMU 管理的 GM→UB MTE2 load 之后，无需额外设置 `@task_overlap(depends_on_prev=False)`。同步生成后会校正直线代码中的位置，保证 wait 紧跟 load、位于后续自动 flag 之前。首个 load 的输入必须已经就绪，不能依赖前驱尚未完成的输出；BMU 只能保护目标内存。存在这类数据依赖时，应使用 `@task_overlap(depends_on_prev=True)` 关闭自动插入，或手工在依赖读取之前放置 wait。
+
+前缀存在同步、未知副作用、条件分支或首个 load 的目标未受 BMU 管理时，保留入口等待。循环继续使用首轮等待和零次迭代补偿；如果生成的循环同步无法满足 wait 前缀约束，则触发下面的编译期回退。
+
+A6 RegBase 编译路径在收到 BMU 规划拒绝标记，或明确的 BMU、Tail 分类、task wait 前缀诊断时，会从原始 TTAdapter 输入和本次编译前的 metadata 重试一次。回退关闭 `enable_bmu_plan`、`enable_auto_early_start` 和 `enable_early_start`，恢复末尾屏障，并保留原始 multibuffer、AutoBlockify 请求。最终生效配置及 `bmu_plan_fallback_reason` 写入 kernel metadata。
+
+基线通过配套 AscendNPU-IR 的 `--enable-conservative-task-wait=true` 在同步生成后补入口等待，避免静态地址覆盖前驱尚未完成的 Tail。已有手工 task wait 的 kernel 不自动重试，无关编译错误和第二次编译失败仍正常报错。这是编译期回退，不处理设备执行中阻塞的 alloc；需要同时更新配套 AscendNPU-IR。

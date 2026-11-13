@@ -346,7 +346,7 @@ def make_ttir(mod, metadata, opt):
 def ttir_to_linalg(mod, metadata, opt, *, named_ops=True):
     # use triton_adapter to lower Triton-MLIR to linalg
     # Get Triton-MLIR as string
-    ttir_code = _serialize_module(mod, opt)
+    ttir_code = _drop_get_next_task(_serialize_module(mod, opt))
     auto_map_parallel_blocks_enabled = _is_auto_map_parallel_blocks_enabled()
     # This is compiler-derived safety metadata, never a user compile option.
     # Derive it even when the feature is currently disabled so a later runtime
@@ -472,6 +472,12 @@ def __get_metadata_attr_by_callback(lib, postfix: str, metadata, meta_key: str):
         metadata[meta_key] = callback_func()
 
 
+def _drop_get_next_task(ir_text):
+    # Serialized MLIR prints each result-free task request on its own line.
+    # BiSheng temporarily owns all GET_NEXT_TASK placement.
+    return re.sub(r'(?m)^[ \t]*(?:hivm\.hir\.get_next_task(?=\s|\[|\{|$)|"hivm\.hir\.get_next_task"\s*\()[^\n]*(?:\n|$)', "", ir_text)
+
+
 def _parse_task_control_metadata(ir_text, metadata):
     ir_text = re.sub(r"//[^\n]*", "", ir_text)
     metadata["has_wait_prev_task"] = bool(re.search(
@@ -521,6 +527,56 @@ def _task_control_bisheng_options(metadata):
     return options
 
 
+class _BmuCompileFallback(RuntimeError):
+    pass
+
+
+def _check_bmu_compile_fallback(result, metadata):
+    if metadata.get("enable_bmu_plan"):
+        stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+        if "[BMU_PLAN_FALLBACK]" in stderr:
+            raise _BmuCompileFallback("the UB allocation plan was rejected")
+
+
+def _bmu_compile_fallback_reason(error, metadata):
+    if not metadata.get("enable_bmu_plan") or metadata.get("has_wait_prev_task"):
+        return None
+    if isinstance(error, _BmuCompileFallback):
+        return str(error)
+    stderr = (error.stderr or b"").decode("utf-8", errors="replace")
+    match = re.search(
+        r"error:\s*((?:mark-tail-buffers:|bmu plan:|bmu task wait prefix:|"
+        r"'bmu\.region_(?:alloc|addr|free)' op)[^\n]*)", stderr)
+    return match.group(1) if match else None
+
+
+def _compile_with_bmu_fallback(compile_once, source, metadata, opt):
+    original = dict(metadata)
+    attempt = dict(original)
+    try:
+        binary = compile_once(source, attempt, opt)
+    except (_BmuCompileFallback, subprocess.CalledProcessError) as error:
+        reason = _bmu_compile_fallback_reason(error, attempt)
+        if reason is None:
+            raise
+        # Rebuild from the original source and options, never from partially
+        # transformed IR or metadata from the rejected attempt.
+        attempt = dict(original)
+        attempt.update(
+            enable_bmu_plan=False,
+            enable_auto_early_start=False,
+            enable_early_start=False,
+            disable_hivm_kernel_end_barrier=False,
+            conservative_task_wait=True,
+            bmu_plan_fallback_reason=reason,
+        )
+        warnings.warn(f"BMU compilation fell back to the static plan: {reason}", RuntimeWarning, stacklevel=2)
+        binary = compile_once(source, attempt, opt)
+    metadata.clear()
+    metadata.update(attempt)
+    return binary
+
+
 def _parse_linalg_metadata(linalg: str, metadata: dict):
     """
     Parse Linalg IR to extract metadata required for NPU compilation.
@@ -533,6 +589,7 @@ def _parse_linalg_metadata(linalg: str, metadata: dict):
 
     Additionally, removes the mix_mode attribute from the IR.
     """
+    linalg = _drop_get_next_task(linalg)
     # --- Regular expressions and examples ---
 
     DISABLE_AUTO_TILE_AND_BIND_SUBBLOCK_REGEX = r'hivm.disable_auto_tile_and_bind_subblock'
@@ -717,6 +774,10 @@ def try_compile_with_config(linalg: str, ub_config: Dict[str, Any], metadata: di
 
 
 def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
+    return _compile_with_bmu_fallback(_linalg_to_bin_enable_npu_compile_910_95_once, linalg, metadata, opt)
+
+
+def _linalg_to_bin_enable_npu_compile_910_95_once(linalg: str, metadata, opt):
     linalg, metadata = _parse_linalg_metadata(linalg, metadata)
     _finalize_program_launch_policy(metadata, opt)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -784,6 +845,8 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
         enable_auto_early_start = metadata.get("enable_auto_early_start")
         if enable_auto_early_start is not None:
             _compile_option_list += [f"--enable-auto-early-start={enable_auto_early_start}"]
+        if metadata.get("conservative_task_wait"):
+            _compile_option_list += ["--enable-conservative-task-wait=true"]
 
         _compile_option_list += [
             f"--enable-auto-bind-sub-block={get_auto_bind_sub_block_option(metadata)}",
@@ -949,6 +1012,8 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
 
         if opt.debug:
             _save_npuir_debug_output(ret.stdout, ret.stderr, tmpdir, metadata["hash"])
+
+        _check_bmu_compile_fallback(ret, metadata)
 
         stdout_str = ret.stdout.decode('utf-8') if ret.stdout else ''
         match = re.search(r'UB\s+size\s*=\s*(\d+)\s*bits', stdout_str)
@@ -1342,10 +1407,10 @@ class NPUOptions:
     plan_memory_strategy: str = None
     # A6-only BMU ring planner for the local UB allocations.
     enable_bmu_plan: bool = None
-    # A6-only early-start handoff: classify the local UB allocations as Main or
-    # Tail and insert the task-control pair. Needs `enable_bmu_plan`, because
-    # the handoff is inserted by the BMU-plan pipeline, and forces
-    # `set_workspace_multibuffer=0` (derived in _parse_linalg_metadata).
+    # A6-only automatic wait after the first BMU-backed MTE2 input load. That
+    # input must be ready independently of unfinished predecessor output.
+    # Needs `enable_bmu_plan` and forces `set_workspace_multibuffer=0`
+    # (derived in _parse_linalg_metadata). BiSheng emits GET_NEXT_TASK.
     enable_auto_early_start: bool = None
     # Control the downstream BiSheng --early-start-enable switch.
     enable_early_start: bool = None
@@ -1530,7 +1595,7 @@ def _normalize_bishengir_simt_optimization_for_context(options: NPUOptions, raw_
 
 def ttir_to_npubin(mod, metadata, opt):
     _export_program_grid_metadata(mod, metadata, require_row_contract=True)
-    ttir_code = _serialize_module(mod, opt)
+    ttir_code = _drop_get_next_task(_serialize_module(mod, opt))
     metadata = _parse_ttir_metadata(ttir_code, metadata)
     _finalize_program_launch_policy(metadata, opt)
 

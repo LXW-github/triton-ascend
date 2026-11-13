@@ -42,16 +42,19 @@ def task_overlap(depends_on_prev: bool = True):
     ``enable_auto_early_start=True`` and ``enable_early_start=True`` to let
     the BMU planner return the Main allocation while the Tail output is still
     being written back and dispatch the successor task before this one drains.
-    Without that pipeline the hint is inert.
+    Without that pipeline the hint is inert. When the decorator is omitted,
+    automatic insertion uses the first BMU-backed GM-to-UB input load as its
+    anchor. That input must already be ready; BMU protects destination storage
+    and does not establish source-data readiness.
 
     ``depends_on_prev`` states whether this kernel reads the output of the task
     that ran before it:
 
     - ``True`` (default): disable automatic task-control insertion. Use a
       hand-written ``wait_prev_task`` or let BiSheng insert the wait.
-    - ``False``: allow automatic insertion after the first independent input
-      load. A hand-written ``wait_prev_task`` always takes precedence and
-      disables automatic insertion for this kernel.
+    - ``False``: explicitly permit the default automatic placement after the
+      first independent input load. A hand-written ``wait_prev_task`` takes
+      precedence and disables automatic insertion for this kernel.
 
     ``enable_early_start`` separately controls BiSheng's low-level early-start
     support. Automatic insertion also removes the A6 kernel-end barrier.
