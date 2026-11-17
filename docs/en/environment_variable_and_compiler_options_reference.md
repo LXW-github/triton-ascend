@@ -235,3 +235,39 @@ Remove the following variables from launch scripts or the runtime environment; t
 | `TRITON_BACKEND` | The variable no longer selects Ascend backend policy. |
 | `TRITON_DISABLE_FFTS` | The compilation target determines FFTS policy. |
 | `TRITON_REGISTER_TENSOR_MSPROF` | Environment variables no longer control tensor-shape registration with msprof. |
+
+## Compile-time BMU and early-start fallback
+
+`enable_auto_early_start=True` places the AIV automatic `wait_prev_task` after the first BMU-backed GM-to-UB MTE2 input load by default, without an additional independent task-overlap hint. Post-sync finalization keeps a straight-line wait immediately after the load and before subsequent generated flags. This input must already be ready independently of unfinished predecessor output; BMU protects destination storage only. For such a data dependency, use `@task_overlap(depends_on_prev=True)` to disable automatic insertion, or place a manual wait before the dependent read.
+
+Synchronization, unknown side effects, conditional control flow, or a first load into non-BMU storage retain an entry wait. Loop loads retain first-iteration waits and zero-trip fallbacks. Generated loop synchronization that violates the task-wait-prefix constraint triggers the compilation fallback below.
+
+The A6 RegBase compilation path retries once from the original TTAdapter input and pre-attempt metadata when it receives a rejected BMU plan marker or a specific BMU, Tail-classification, or task-wait-prefix diagnostic. The retry disables `enable_bmu_plan` and `enable_auto_early_start`, preserves the original `enable_early_start` setting, restores the kernel-end barrier, and preserves the original multibuffer and AutoBlockify requests. Kernel metadata records the effective settings and `bmu_plan_fallback_reason`.
+
+The baseline requests `--enable-conservative-task-wait=true` from the matching AscendNPU-IR to insert an entry wait after synchronization, protecting static addresses from a predecessor's in-flight Tail. Kernels with a handwritten task wait are not retried automatically. Unrelated compilation failures and failures of the second attempt remain errors. This is compilation fallback, not recovery from a blocked device allocation; update the matching AscendNPU-IR as well.
+
+
+### BMU and MIX compilation
+
+A6 SIMD kernels use `enable_bmu_plan=True` for BMU planning of pure Vector,
+Cube and MIX entries. `enable_auto_early_start` independently controls automatic
+wait placement and input prefetch. Automatic early start plans private and
+shared groups in one full segment per buffer kind. After task wait and the last
+real reservation, an unused padding allocation/free pair closes one complete
+cursor round; an already full round needs no padding.
+`bmu_mix_static_ub_slices=24` continues to configure the nominal shared/static
+window without automatic early start and is ignored in automatic mode.
+The Ascend960 BMU path uses 320 KiB of UB, reclaiming the ordinary static
+planner's 8 KiB reservation. Only automatic early start selects the unified
+single-segment layout.
+
+`@task_overlap(depends_on_prev=True)` retains BMU layout preparation, disables
+automatic prefetch and selects an entry task wait. Manual waits retain their explicit placement.
+Automatic mode uses the NPU-IR wait and disables duplicate BiSheng insertion;
+scalar entries without grouped allocations also retain an entry wait.
+
+The matching NPU-IR rechecks materialized addresses, synchronization and complete
+allocation rounds in automatic mode. Ordinary BMU retains its existing layout
+and reset validation. Final BiSheng
+GET_NEXT_TASK/fake-end placement, device accuracy and measured MTE3/MTE2 overlap
+still require the matching device or simulator environment.

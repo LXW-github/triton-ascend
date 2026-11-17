@@ -235,3 +235,35 @@ triton.Config({"multibuffer_mode": {"gm": 1, "l1": 2, "l0c": 1, "ub": 1}})
 | `TRITON_BACKEND` | 该变量不再用于选择Ascend后端策略。 |
 | `TRITON_DISABLE_FFTS` | FFTS策略由编译目标决定。 |
 | `TRITON_REGISTER_TENSOR_MSPROF` | 不再通过环境变量控制msprof的张量形状注册。 |
+
+## BMU 与 early start 的编译期回退
+
+`enable_auto_early_start=True` 默认将 AIV 侧的自动 `wait_prev_task` 放在首个受 BMU 管理的 GM→UB MTE2 load 之后，无需额外设置 `@task_overlap(depends_on_prev=False)`。同步生成后会校正直线代码中的位置，保证 wait 紧跟 load、位于后续自动 flag 之前。首个 load 的输入必须已经就绪，不能依赖前驱尚未完成的输出；BMU 只能保护目标内存。存在这类数据依赖时，应使用 `@task_overlap(depends_on_prev=True)` 关闭自动插入，或手工在依赖读取之前放置 wait。
+
+前缀存在同步、未知副作用、条件分支或首个 load 的目标未受 BMU 管理时，保留入口等待。循环继续使用首轮等待和零次迭代补偿；如果生成的循环同步无法满足 wait 前缀约束，则触发下面的编译期回退。
+
+A6 RegBase 编译路径在收到 BMU 规划拒绝标记，或明确的 BMU、Tail 分类、task wait 前缀诊断时，会从原始 TTAdapter 输入和本次编译前的 metadata 重试一次。回退关闭 `enable_bmu_plan` 和 `enable_auto_early_start`，保留原始 `enable_early_start` 设置，恢复末尾屏障，并保留原始 multibuffer、AutoBlockify 请求。最终生效配置及 `bmu_plan_fallback_reason` 写入 kernel metadata。
+
+基线通过配套 AscendNPU-IR 的 `--enable-conservative-task-wait=true` 在同步生成后补入口等待，避免静态地址覆盖前驱尚未完成的 Tail。已有手工 task wait 的 kernel 不自动重试，无关编译错误和第二次编译失败仍正常报错。这是编译期回退，不处理设备执行中阻塞的 alloc；需要同时更新配套 AscendNPU-IR。
+
+
+### BMU 与 MIX 编译集成
+
+A6 SIMD kernel 统一使用 `enable_bmu_plan=True` 启用 BMU 规划，编译器自动处理
+纯 Vector、Cube 和 MIX；`enable_auto_early_start` 独立控制自动等待与提前搬入。
+自动 early_start 使用每种存储各一个完整 segment，私有组和共享 TCB 一起规划。
+在最后一次真实分配之后、task wait 之后，补一对无数据访问的 padding alloc/free，
+使每个 program 的游标恰好推进一整圈，正好占满时省略 padding。
+`bmu_mix_static_ub_slices=24` 继续配置非自动模式下共享/静态窗口的名义 slice 数；
+自动模式忽略该选项。Ascend960 的 BMU 路径使用完整 320 KiB UB，
+收回普通静态规划预留的 8 KiB；单 segment 布局只用于自动 early_start。
+
+依赖提示 `@task_overlap(depends_on_prev=True)` 保留 BMU 布局准备，关闭自动提前搬入，
+并使用入口 task wait；
+手工 wait 保留原有位置。自动模式由 NPU-IR 提供 wait，并关闭 BiSheng 的重复自动插入。
+没有分组内存的标量入口也会保留入口 wait。
+
+配套 NPU-IR 在最终编译器 IR 中复查实际地址、同步，以及自动模式的完整分配轮次；
+普通 BMU 保留原有布局和 reset 校验。
+最终 BiSheng 指令中的 GET_NEXT_TASK/fake-end
+位置、设备精度和真实 MTE3/MTE2 overlap 仍需在配套设备或仿真环境验证。
