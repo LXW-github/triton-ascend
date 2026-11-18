@@ -558,7 +558,7 @@ def _bmu_compile_fallback_reason(error, metadata):
         return str(error)
     stderr = (error.stderr or b"").decode("utf-8", errors="replace")
     match = re.search(
-        r"error:\s*((?:mark-tail-buffers:|bmu plan:|bmu task wait prefix:|BMU final contract:|BMU LLVM contract:|"
+        r"error:\s*((?:mark-tail-buffers:|bmu plan:|bmu sync:|bmu task wait prefix:|BMU final contract:|BMU LLVM contract:|"
         r"'bmu\.region_(?:alloc|addr|free)' op)[^\n]*)", stderr)
     return match.group(1) if match else None
 

@@ -148,6 +148,7 @@ def test_temporary_filter_preserves_other_ir(policy):
 @pytest.mark.parametrize("diagnostic", [
     "error: mark-tail-buffers: cannot trace an output",
     "error: bmu plan: grouped allocations exceed the ring capacity",
+    "error: bmu sync: invalid shared access or insufficient event IDs",
     "error: 'bmu.region_free' op access is not ordered before release",
     "error: bmu task wait prefix: synchronization may precede the wait",
     "[BMU_PLAN_FALLBACK] UB allocation plan was rejected",
