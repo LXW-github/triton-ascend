@@ -41,7 +41,7 @@ def metadata(**kwargs):
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_backend_switch_is_independent(policy, enabled):
-    data = metadata(enable_early_start=enabled)
+    data = metadata(enable_early_start=enabled, parallel_mode="simd")
     policy._parse_task_control_metadata("module {}", data)
     options = policy._task_control_bisheng_options(data)
     assert f"--early-start-enable={str(enabled).lower()}" in options.split()
@@ -96,20 +96,70 @@ def test_manual_wait_overrides_backend_wait_option(policy, text):
     assert tokens.count("-mllvm") == 3
 
 
+@pytest.mark.parametrize(("mix_mode", "unit_flag", "expected_unit_flag"), [
+    ("aiv", None, None),
+    ("aic", None, None),
+    ("mix", None, False),
+    ("mix", True, True),
+])
+def test_a6_simd_enables_bmu_and_early_start_by_default(policy, mix_mode, unit_flag, expected_unit_flag):
+    data = metadata(parallel_mode="simd", mix_mode=mix_mode, unit_flag=unit_flag)
+    policy._parse_task_control_metadata("module {}", data)
+    assert data["enable_bmu_plan"] is True
+    assert data["enable_auto_early_start"] is True
+    assert data["enable_early_start"] is True
+    assert data["disable_hivm_kernel_end_barrier"] is True
+    assert data["disable_auto_blockify_loop"] is True
+    assert data["set_workspace_multibuffer"] == 0
+    assert data["unit_flag"] is expected_unit_flag
+
+
+@pytest.mark.parametrize(("overrides", "text"), [
+    ({"enable_auto_early_start": False}, "module {}"),
+    ({"enable_bmu_plan": False}, "module {}"),
+    ({"parallel_mode": "mix_simd_simt"}, "module {}"),
+    ({"target": SimpleNamespace(arch="Ascend950")}, "module {}"),
+    ({}, 'module attributes {hivm.task_overlap = "depends"} {}'),
+    ({}, "hivm.hir.wait_prev_task[#hivm.pipe<PIPE_S>]"),
+])
+def test_ineligible_kernels_keep_explicit_task_policy(policy, overrides, text):
+    data = metadata(parallel_mode="simd")
+    data.update(overrides)
+    policy._parse_task_control_metadata(text, data)
+    assert not data.get("enable_bmu_plan")
+    assert not data.get("enable_auto_early_start")
+    assert not data.get("disable_hivm_kernel_end_barrier")
+
+
 def test_absent_wait_preserves_backend_default(policy):
     data = metadata()
     policy._parse_task_control_metadata("module {}", data)
     assert policy._task_control_bisheng_options(data) is None
 
 
+def test_explicit_conservative_wait_disables_backend_wait(policy):
+    text = 'module attributes {mix_mode = "aiv", parallel_mode = "simd"} {\n func.func @kernel() { return }\n}'
+    data = metadata(enable_conservative_task_wait=True,
+                    bisheng_options="-mllvm --cce-insert-wait-prev-task-enable=true -mllvm -other=1")
+    _, result = policy._parse_linalg_metadata(text, data)
+    assert result["conservative_task_wait"] is True
+    assert not result.get("enable_auto_early_start")
+    assert not result.get("enable_bmu_plan")
+    assert shlex.split(policy._task_control_bisheng_options(result)) == [
+        "-mllvm", "-other=1", "-mllvm", "--cce-insert-wait-prev-task-enable=false",
+    ]
+
+
 @pytest.mark.parametrize("arch", ["Ascend950", "Ascend910B1"])
 @pytest.mark.parametrize("text", ["module {}", 'module attributes {hivm.task_overlap = "depends"} {}'])
 def test_non_a6_does_not_enable_task_control(policy, arch, text):
-    data = metadata(enable_bmu_plan=True, enable_early_start=True, enable_auto_early_start=True)
+    data = metadata(enable_bmu_plan=True, enable_early_start=True, enable_auto_early_start=True,
+                    enable_conservative_task_wait=True)
     data["target"].arch = arch
     policy._parse_task_control_metadata(text, data)
     assert data["enable_early_start"] is None
     assert data["enable_auto_early_start"] is None
+    assert data["enable_conservative_task_wait"] is None
     assert policy._task_control_bisheng_options(data) is None
 
 
@@ -304,6 +354,7 @@ def test_public_compiler_retries_command_and_binary(policy, monkeypatch, rejecti
     assert "--enable-auto-blockify-loop" in second
     assert "--disable-hivm-kernel-end-barrier" not in second
     assert any("--early-start-enable=true" in arg for arg in second)
+    assert any("--cce-insert-wait-prev-task-enable=false" in arg for arg in second)
     assert data["required_ub_bits"] == 512
     assert data["enable_bmu_plan"] is False
 

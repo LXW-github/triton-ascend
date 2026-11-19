@@ -238,6 +238,10 @@ triton.Config({"multibuffer_mode": {"gm": 1, "l1": 2, "l0c": 1, "ub": 1}})
 
 ## BMU 与 early start 的编译期回退
 
+三个 task-control 开关均未设置时，A6 SIMD 编译默认开启 BMU 规划、自动任务等待和 BiSheng early start。
+可设置 `enable_auto_early_start=False` 关闭这组默认行为。启用自动 early start 的 MIX 默认使用
+显式 Cube→FIX 同步，`unit_flag` 可以覆盖此策略。
+
 `enable_auto_early_start=True` 默认将 AIV 侧的自动 `wait_prev_task` 放在首个受 BMU 管理的 GM→UB MTE2 load 之后，无需额外设置 `@task_overlap(depends_on_prev=False)`。同步生成后会校正直线代码中的位置，保证 wait 紧跟 load、位于后续自动 flag 之前。首个 load 的输入必须已经就绪，不能依赖前驱尚未完成的输出；BMU 只能保护目标内存。存在这类数据依赖时，应使用 `@task_overlap(depends_on_prev=True)` 关闭自动插入，或手工在依赖读取之前放置 wait。
 
 前缀存在同步、未知副作用、条件分支或首个 load 的目标未受 BMU 管理时，保留入口等待。循环继续使用首轮等待和零次迭代补偿；如果生成的循环同步无法满足 wait 前缀约束，则触发下面的编译期回退。

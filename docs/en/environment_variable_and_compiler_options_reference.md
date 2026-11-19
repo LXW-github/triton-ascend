@@ -238,6 +238,12 @@ Remove the following variables from launch scripts or the runtime environment; t
 
 ## Compile-time BMU and early-start fallback
 
+A6 SIMD compilation defaults to BMU planning, automatic task waits and BiSheng
+early start when all three task-control options are unset. Set
+`enable_auto_early_start=False` to opt out of this combined default. MIX with
+automatic early start defaults to explicit Cube-to-FIX synchronization. The
+`unit_flag` option overrides that policy.
+
 `enable_auto_early_start=True` places the AIV automatic `wait_prev_task` after the first BMU-backed GM-to-UB MTE2 input load by default, without an additional independent task-overlap hint. Post-sync finalization keeps a straight-line wait immediately after the load and before subsequent generated flags. This input must already be ready independently of unfinished predecessor output; BMU protects destination storage only. For such a data dependency, use `@task_overlap(depends_on_prev=True)` to disable automatic insertion, or place a manual wait before the dependent read.
 
 Synchronization, unknown side effects, conditional control flow, or a first load into non-BMU storage retain an entry wait. Loop loads retain first-iteration waits and zero-trip fallbacks. Generated loop synchronization that violates the task-wait-prefix constraint triggers the compilation fallback below.

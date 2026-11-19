@@ -485,18 +485,28 @@ def _parse_task_control_metadata(ir_text, metadata):
     depends = bool(re.search(r'\bhivm\.task_overlap\s*=\s*"depends"', ir_text))
     if metadata["has_wait_prev_task"] or depends:
         metadata["enable_auto_early_start"] = False
-    if any(metadata.get(key) for key in ("enable_bmu_plan", "enable_auto_early_start", "enable_early_start")):
-        if not _is_a6_target_arch(metadata["target"].arch):
-            for key in ("enable_bmu_plan", "enable_auto_early_start", "enable_early_start"):
+    task_options = ("enable_bmu_plan", "enable_auto_early_start", "enable_early_start")
+    if not _is_a6_target_arch(metadata["target"].arch):
+        a6_options = (*task_options, "enable_conservative_task_wait")
+        if any(metadata.get(key) for key in a6_options):
+            for key in a6_options:
                 metadata[key] = None
             print(f"warning: BMU and early start are only supported on A6 targets, "
                   f"ignoring them for {metadata['target'].arch}")
-            return
+        return
+    if (metadata.get("parallel_mode") == "simd"
+            and not metadata.get("enable_conservative_task_wait")
+            and all(metadata.get(key) is None for key in task_options)):
+        metadata["enable_auto_early_start"] = True
+        metadata["enable_early_start"] = True
     if metadata.get("enable_auto_early_start"):
         metadata["enable_bmu_plan"] = True
         metadata["disable_hivm_kernel_end_barrier"] = True
         if not metadata.get("auto_blockify_with_early_start"):
             metadata["disable_auto_blockify_loop"] = True
+        # BMU release verification needs an explicit Cube-to-FIX dependency.
+        if metadata.get("mix_mode") == "mix" and metadata.get("unit_flag") is None:
+            metadata["unit_flag"] = False
     if metadata.get("enable_bmu_plan"):
         if depends and not metadata["has_wait_prev_task"]:
             metadata["conservative_task_wait"] = True
@@ -655,6 +665,8 @@ def _parse_linalg_metadata(linalg: str, metadata: dict):
     metadata["mix_mode"] = re.search(MIX_MODE_REGEX, linalg).group(1)
     metadata["parallel_mode"] = re.search(PARALLEL_MODE_REGEX, linalg).group(1)
     _parse_task_control_metadata(linalg, metadata)
+    if metadata.get("enable_conservative_task_wait"):
+        metadata["conservative_task_wait"] = True
     metadata["kernel_name"] = re.search(KERNEL_NAME_REGEX, linalg).group(1)
     # Check the function load_binary in npu_driver.py.
     metadata["name"] = metadata["kernel_name"]
@@ -1429,6 +1441,8 @@ class NPUOptions:
     enable_auto_early_start: bool = None
     # Control the downstream BiSheng --early-start-enable switch.
     enable_early_start: bool = None
+    # Request an A6 entry wait on the BiShengIR compilation route.
+    enable_conservative_task_wait: bool = False
     # Internal launch metadata.  The mode is initially derived from
     # compile_mode, then replaced with the mode emitted by TritonToLinalg.
     parallel_mode: str = field(default="simd", init=False)
