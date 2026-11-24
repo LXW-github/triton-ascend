@@ -1013,6 +1013,10 @@ def get_ascend_arch_from_env():
     return ""
 
 
+def is_a6_target_arch(arch: str) -> bool:
+    return isinstance(arch, str) and arch.startswith(("Ascend910_96", "Ascend960"))
+
+
 def ub_size_in_kbytes_for_arch(arch: str) -> int:
     """Return the raw UB capacity for a supported Ascend target architecture.
 
@@ -1022,7 +1026,7 @@ def ub_size_in_kbytes_for_arch(arch: str) -> int:
     """
     if not isinstance(arch, str) or not arch:
         return 0
-    if arch.startswith(("Ascend910_96", "Ascend960")):
+    if is_a6_target_arch(arch):
         return 376
     if arch.startswith(("Ascend910_95", "Ascend950")):
         return 256

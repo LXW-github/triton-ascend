@@ -65,6 +65,7 @@ from triton.backends.ascend.utils import (
     downgrade_llir,
     force_disable_ffts,
     graph_ub_budget_bytes_for_arch,
+    is_a6_target_arch,
     ub_size_in_kbytes_for_arch,
     get_cann_version_file_hash,
     is_cann_version_at_least,
@@ -486,7 +487,7 @@ def _parse_task_control_metadata(ir_text, metadata):
     if metadata["has_wait_prev_task"] or depends:
         metadata["enable_auto_early_start"] = False
     task_options = ("enable_bmu_plan", "enable_auto_early_start", "enable_early_start")
-    if not _is_a6_target_arch(metadata["target"].arch):
+    if not is_a6_target_arch(metadata["target"].arch):
         a6_options = (*task_options, "enable_conservative_task_wait")
         if any(metadata.get(key) for key in a6_options):
             for key in a6_options:
@@ -856,7 +857,7 @@ def _linalg_to_bin_enable_npu_compile_910_95_once(linalg: str, metadata, opt):
         # barrier drain is only removable on A6, so keep the flag off the
         # command line on other targets.
         if metadata["disable_hivm_kernel_end_barrier"]:
-            if _is_a6_target_arch(opt.target_arch):
+            if is_a6_target_arch(opt.target_arch):
                 _compile_option_list += ["--disable-hivm-kernel-end-barrier"]
             else:
                 print(f"warning: disable_hivm_kernel_end_barrier is only supported on A6 targets, "
@@ -881,7 +882,7 @@ def _linalg_to_bin_enable_npu_compile_910_95_once(linalg: str, metadata, opt):
         _compile_option_list += [f"--enable-optimized-metaop={is_cann_version_at_least(9, 2, 0)}"]
 
         npu_utils = NPUUtils()
-        if npu_utils.has_device_limit():
+        if is_a6_target_arch(opt.target_arch) or npu_utils.has_device_limit():
             _compile_option_list += [
                 f"--custom-aic-number={npu_utils.get_aicore_num()}",
             ]
@@ -1301,10 +1302,6 @@ def _is_register_based_target_arch(arch: str) -> bool:
         ("Ascend910_95", "Ascend950")))
 
 
-def _is_a6_target_arch(arch: str) -> bool:
-    return isinstance(arch, str) and arch.startswith(("Ascend910_96", "Ascend960"))
-
-
 def _get_libdevice_compile_state() -> bool:
     return bool(os.getenv("TRITON_ENABLE_LIBDEVICE", False))
 
@@ -1676,7 +1673,7 @@ def ttir_to_npubin(mod, metadata, opt):
             # Mirror the A6 path: the kernel-end drain is only removable where
             # the task-level ordering exists.
             if metadata.get("disable_hivm_kernel_end_barrier"):
-                if _is_a6_target_arch(opt.target_arch):
+                if is_a6_target_arch(opt.target_arch):
                     _compile_option_list += ["--disable-hivm-kernel-end-barrier=true"]
                 else:
                     print(f"warning: disable_hivm_kernel_end_barrier is only supported on A6 "
@@ -1779,7 +1776,7 @@ class AscendBackend(BaseBackend):
             # injects cross-core PIPE_S sync that the A6 camodel cannot model,
             # causing a deadlock for mix kernels. Users may still opt in explicitly.
             if options.enable_dynamic_cv_pipeline is None:
-                default_enable = False if _is_a6_target_arch(self.target.arch) else options.compile_on_910_95
+                default_enable = False if is_a6_target_arch(self.target.arch) else options.compile_on_910_95
                 object.__setattr__(options, "enable_dynamic_cv_pipeline", default_enable)
             if not internal_options:
                 _normalize_bishengir_simt_optimization_for_context(options, normalized_opts)

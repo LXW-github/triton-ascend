@@ -19,7 +19,7 @@ pytestmark = pytest.mark.backend("none")
 def policy():
     source = Path(__file__).resolve().parents[2] / "backend" / "compiler.py"
     tree = ast.parse(source.read_text())
-    names = {"_is_a6_target_arch", "_parse_task_control_metadata",
+    names = {"_parse_task_control_metadata",
              "_set_bisheng_mllvm_option", "_task_control_bisheng_options",
              "_parse_linalg_metadata", "_parse_ttir_metadata", "_drop_get_next_task",
              "_bmu_mix_compile_options",
@@ -28,10 +28,13 @@ def policy():
              "_finalize_program_launch_policy", "get_auto_bind_sub_block_option",
              "linalg_to_bin_enable_npu_compile_910_95", "_linalg_to_bin_enable_npu_compile_910_95_once"}
     nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
+    utils = source.with_name("utils.py")
+    a6_resolver = next(node for node in ast.parse(utils.read_text()).body
+                       if isinstance(node, ast.FunctionDef) and node.name == "is_a6_target_arch")
     namespace = {"re": re, "subprocess": subprocess, "warnings": warnings,
                  "Path": Path, "os": os, "tempfile": tempfile, "ctypes": ctypes, "shlex": shlex,
                  "_get_auto_blockify_blacklist_reasons": lambda _ir: []}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
+    exec(compile(ast.Module(body=[a6_resolver, *nodes], type_ignores=[]), str(source), "exec"), namespace)
     return SimpleNamespace(**{name: namespace[name] for name in names})
 
 
@@ -314,7 +317,9 @@ def test_public_compiler_retries_command_and_binary(policy, monkeypatch, rejecti
         "get_common_bishengir_compile_options": lambda _metadata: [],
         "_check_bishengir_api_change": lambda: True,
         "_is_auto_map_parallel_blocks_enabled": lambda: True,
-        "NPUUtils": lambda: SimpleNamespace(has_device_limit=lambda: False),
+        "NPUUtils": lambda: SimpleNamespace(has_device_limit=lambda: False,
+                                            get_aicore_num=lambda: 36,
+                                            get_aivector_core_num=lambda: 72),
         "is_cann_version_at_least": lambda *_args: True,
         "force_disable_ffts": lambda _arch: False,
         "_is_ascend_sanitizer_enabled": lambda: False,
@@ -344,6 +349,10 @@ def test_public_compiler_retries_command_and_binary(policy, monkeypatch, rejecti
     assert result == b"baseline"
     assert len(commands) == 2
     first, second = commands
+    assert "--custom-aic-number=36" in first
+    assert "--custom-aic-number=36" in second
+    assert "--custom-aiv-number=72" in first
+    assert "--custom-aiv-number=72" in second
     assert "--enable-bmu-plan=True" in first
     assert "--set-workspace-multibuffer=0" in first
     assert ("--enable-auto-blockify-loop" not in first) == auto_mode
