@@ -1302,6 +1302,9 @@ def _is_register_based_target_arch(arch: str) -> bool:
         ("Ascend910_95", "Ascend950")))
 
 
+_is_a6_target_arch = is_a6_target_arch
+
+
 def _get_libdevice_compile_state() -> bool:
     return bool(os.getenv("TRITON_ENABLE_LIBDEVICE", False))
 
