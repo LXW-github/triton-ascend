@@ -112,9 +112,10 @@ def compiler_module():
     utils_stub = types.ModuleType(utils_name)
     utils_path = compiler_path.with_name("utils.py")
     utils_tree = ast.parse(utils_path.read_text())
-    mode_helper = next(node for node in utils_tree.body
-                       if isinstance(node, ast.FunctionDef) and node.name == "_multibuffer_mode_to_tuple")
-    exec(compile(ast.Module(body=[mode_helper], type_ignores=[]), str(utils_path), "exec"), utils_stub.__dict__)
+    helper_names = {"_multibuffer_mode_to_tuple", "is_a6_target_arch"}
+    helpers = [node for node in utils_tree.body
+               if isinstance(node, ast.FunctionDef) and node.name in helper_names]
+    exec(compile(ast.Module(body=helpers, type_ignores=[]), str(utils_path), "exec"), utils_stub.__dict__)
     for name in (
             "_check_bishengir_api_change",
             "_check_bishengir_able_save_ir",

@@ -317,9 +317,9 @@ def test_public_compiler_retries_command_and_binary(policy, monkeypatch, rejecti
         "get_common_bishengir_compile_options": lambda _metadata: [],
         "_check_bishengir_api_change": lambda: True,
         "_is_auto_map_parallel_blocks_enabled": lambda: True,
-        "NPUUtils": lambda: SimpleNamespace(has_device_limit=lambda: False,
-                                            get_aicore_num=lambda: 36,
-                                            get_aivector_core_num=lambda: 72),
+        "NPUUtils": lambda: SimpleNamespace(
+            has_device_limit=lambda: False, get_aicore_num=lambda: 36, get_aivector_core_num=lambda: 72
+        ),
         "is_cann_version_at_least": lambda *_args: True,
         "force_disable_ffts": lambda _arch: False,
         "_is_ascend_sanitizer_enabled": lambda: False,

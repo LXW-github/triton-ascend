@@ -26,6 +26,7 @@ class A6TargetContract(unittest.TestCase):
         backend = Path(__file__).resolve().parents[2] / 'backend'
         cls.utils = load_policies(
             backend / 'utils.py', {
+                'is_a6_target_arch',
                 'is_compile_on_910_95',
                 'is_ffts_supported',
                 'force_disable_ffts',
